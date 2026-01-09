@@ -1,0 +1,359 @@
+---
+title: "Chapter 7: Multivariate Adaptive Regression Splines"
+output: html_notebook
+---
+
+__Note__: Some results may differ from the hard copy book due to the changing of sampling procedures introduced in R 3.6.0. See http://bit.ly/35D1SW7 for more details. Access and run the source code for this notebook [here](https://rstudio.cloud/project/801185). 
+
+Hidden chapter requirements used in the book to set the plotting theme and load packages used in hidden code chunks:
+
+```{r setup}
+# Set the graphical theme
+ggplot2::theme_set(ggplot2::theme_light())
+
+# Set global knitr chunk options
+knitr::opts_chunk$set(
+  fig.align = "center",
+  fig.height = 3.5,
+  warning = FALSE, 
+  message = FALSE
+)
+
+# Load required packages
+library(dplyr)
+```
+
+## Prerequisites
+
+For this chapter we will use the following packages:
+
+```{r 10-pkgs, message=FALSE}
+# Helper packages
+library(dplyr)     # for data wrangling
+library(ggplot2)   # for awesome plotting
+
+# Modeling packages
+library(earth)     # for fitting MARS models
+library(caret)     # for automating the tuning process
+
+# Model interpretability packages
+library(vip)       # for variable importance
+library(pdp)       # for variable relationships
+```
+
+To illustrate various concepts we'll continue with the `ames_train` and `ames_test` data sets:
+
+```{r MARS-ames-train, echo=TRUE}
+# Stratified sampling with the rsample package
+set.seed(123)
+ames <- AmesHousing::make_ames()
+split  <- rsample::initial_split(ames, prop = 0.7, strata = "Sale_Price")
+ames_train  <- rsample::training(split)
+ames_test   <- rsample::testing(split)
+```
+
+## The basic idea
+
+Figure 7.1:
+
+```{r nonlinear-comparisons, echo=TRUE, fig.height=6, fig.width=8, fig.cap="Blue line represents predicted (`y`) values as a function of `x` for alternative approaches to modeling explicit nonlinear regression patterns. (A) Traditional linear regression approach does not capture any nonlinearity unless the predictor or response is transformed (i.e. log transformation). (B) Degree-2 polynomial, (C) Degree-3 polynomial, (D) Step function cutting `x` into six categorical levels."}
+set.seed(123)  # for reproducibility
+x <- seq(from = 0, to = 2 * pi, length = 500)
+y <- sin(x) + rnorm(length(x), sd = 0.3)
+df <- data.frame(x, y) %>%
+  filter(x < 6)
+
+p1 <- ggplot(df, aes(x, y)) +
+  geom_point(size = 1, alpha = .2) +
+  geom_smooth(method = "lm", se = FALSE) +
+  ggtitle("(A) Assumed linear relationship")
+
+p2 <- ggplot(df, aes(x, y)) +
+  geom_point(size = 1, alpha = .2) +
+  stat_smooth( method = "lm", se = FALSE, formula = y ~ poly(x, 2, raw = TRUE)) +
+  ggtitle("(B) Degree-2 polynomial regression")
+
+p3 <- ggplot(df, aes(x, y)) +
+  geom_point(size = 1, alpha = .2) +
+  stat_smooth( method = "lm", se = FALSE, formula = y ~ poly(x, 3, raw = TRUE)) +
+  ggtitle("(C) Degree-3 polynomial regression")
+
+# fit step function model (6 steps)
+step_fit <- lm(y ~ cut(x, 5), data = df)
+step_pred <- predict(step_fit, df)
+
+p4 <- ggplot(cbind(df, step_pred), aes(x, y)) +
+  geom_point(size = 1, alpha = .2) +
+  geom_line(aes(y = step_pred), size = 1, color = "blue") +
+  ggtitle("(D) Step function regression")
+
+gridExtra::grid.arrange(p1, p2, p3, p4, nrow = 2)
+```
+
+### Multivariate adaptive regression splines
+
+Figure 7.2:
+
+```{r examples-of-multiple-knots, echo=TRUE, fig.height=6, fig.width=8, fig.cap="Examples of fitted regression splines of one (A), two (B), three (C), and four (D) knots."}
+# one knot
+mars1 <- mda::mars(df$x, df$y, nk = 3, prune = FALSE)
+p1 <- df %>%
+  mutate(predicted = as.vector(mars1$fitted.values)) %>%
+  ggplot(aes(x, y)) +
+  geom_point(size = 1, alpha = .2) +
+  geom_line(aes(y = predicted), size = 1, color = "blue") +
+  ggtitle("(A) One knot")
+
+# two knots
+mars2 <- mda::mars(df$x, df$y, nk = 5, prune = FALSE)
+p2 <- df %>%
+  mutate(predicted = as.vector(mars2$fitted.values)) %>%
+  ggplot(aes(x, y)) +
+  geom_point(size = 1, alpha = .2) +
+  geom_line(aes(y = predicted), size = 1, color = "blue") +
+  ggtitle("(B) Two knots")
+
+mars3 <- mda::mars(df$x, df$y, nk = 7, prune = FALSE)
+p3 <- df %>%
+  mutate(predicted = as.vector(mars3$fitted.values)) %>%
+  ggplot(aes(x, y)) +
+  geom_point(size = 1, alpha = .2) +
+  geom_line(aes(y = predicted), size = 1, color = "blue") +
+  ggtitle("(C) Three knots")
+
+mars4 <- mda::mars(df$x, df$y, nk = 9, prune = FALSE)
+p4 <- df %>%
+  mutate(predicted = as.vector(mars4$fitted.values)) %>%
+  ggplot(aes(x, y)) +
+  geom_point(size = 1, alpha = .2) +
+  geom_line(aes(y = predicted), size = 1, color = "blue") +
+  ggtitle("(D) Four knots")
+
+
+gridExtra::grid.arrange(p1, p2, p3, p4, nrow = 2)
+```
+
+## Fitting a basic MARS model
+
+```{r fit-basic-model}
+# Fit a basic MARS model
+mars1 <- earth(
+  Sale_Price ~ .,  
+  data = ames_train   
+)
+
+# Print model summary
+print(mars1)
+```
+
+```{r basic-mod-coef}
+summary(mars1) %>% .$coefficients %>% head(10)
+```
+
+```{r basic-mod-plot, fig.width=5, fig.height=3.5, fig.cap="Model summary capturing GCV $R^2$ (left-hand y-axis and solid black line) based on the number of terms retained (x-axis) which is based on the number of predictors used to make those terms (right-hand side y-axis). For this model, 36 non-intercept terms were retained which are based on 24 predictors.  Any additional terms retained in the model, over and above these 36, result in less than 0.001 improvement in the GCV $R^2$."}
+plot(mars1, which = 1)
+```
+
+```{r fit-basic-model-m2}
+# Fit a basic MARS model
+mars2 <- earth(
+  Sale_Price ~ .,  
+  data = ames_train,
+  degree = 2
+)
+
+# check out the first 10 coefficient terms
+summary(mars2) %>% .$coefficients %>% head(10)
+```
+
+## Tuning
+
+```{r tuning-grid}
+# create a tuning grid
+hyper_grid <- expand.grid(
+  degree = 1:3, 
+  nprune = seq(2, 100, length.out = 10) %>% floor()
+)
+
+head(hyper_grid)
+```
+
+```{r grid-search, fig.cap="Cross-validated RMSE for the 30 different hyperparameter combinations in our grid search. The optimal model retains 45 terms and includes up to 3$^{rd}$ degree interactions.", fig.height=3}
+# Cross-validated model
+set.seed(123)  # for reproducibility
+cv_mars <- train(
+  x = subset(ames_train, select = -Sale_Price),
+  y = ames_train$Sale_Price,
+  method = "earth",
+  metric = "RMSE",
+  trControl = trainControl(method = "cv", number = 10),
+  tuneGrid = hyper_grid
+)
+
+# View results
+cv_mars$bestTune
+ggplot(cv_mars)
+```
+
+Table 7.1:
+
+```{r cv-model-comparison, echo=TRUE, fig.cap="Cross-validated RMSE results for tuned MARS and regression models."}
+set.seed(123)
+cv_model1 <- train(
+  Sale_Price ~ ., 
+  data = ames_train, 
+  method = "lm",
+  metric = "RMSE",
+  trControl = trainControl(method = "cv", number = 10)
+)
+
+set.seed(123)
+cv_model2 <- train(
+  Sale_Price ~ ., 
+  data = ames_train, 
+  method = "pcr",
+  trControl = trainControl(method = "cv", number = 10),
+  metric = "RMSE",
+  preProcess = c("zv", "center", "scale"),
+  tuneLength = 20
+)
+
+set.seed(123)
+cv_model3 <- train(
+  Sale_Price ~ ., 
+  data = ames_train, 
+  method = "pls",
+  trControl = trainControl(method = "cv", number = 10),
+  metric = "RMSE",
+  preProcess = c("zv", "center", "scale"),
+  tuneLength = 20
+)
+
+set.seed(123)
+cv_model4 <- train(
+  Sale_Price ~ ., 
+  data = ames_train,
+  method = "glmnet",
+  preProc = c("zv", "center", "scale"),
+  trControl = trainControl(method = "cv", number = 10),
+  metric = "RMSE",
+  tuneLength = 10
+)
+
+# extract out of sample performance measures
+summary(resamples(list(
+  "LM" = cv_model1, 
+  "PCR" = cv_model2, 
+  "PLS" = cv_model3,
+  "ENET" = cv_model4,
+  "MARS" = cv_mars
+)))$statistics$RMSE %>%
+  kableExtra::kable(caption = "Cross-validated RMSE results for tuned MARS and regression models.") %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+
+## Feature interpretation 
+
+```{r vip, fig.height=5.5, fig.width=9, fig.cap="Variable importance based on impact to GCV (left) and RSS (right) values as predictors are added to the model. Both variable importance measures will usually give you very similar results."}
+# variable importance plots
+p1 <- vip(cv_mars, num_features = 40, bar = FALSE, value = "gcv") + ggtitle("GCV")
+p2 <- vip(cv_mars, num_features = 40, bar = FALSE, value = "rss") + ggtitle("RSS")
+
+gridExtra::grid.arrange(p1, p2, ncol = 2)
+```
+
+```{r}
+# extract coefficients, convert to tidy data frame, and
+# filter for interaction terms
+cv_mars$finalModel %>%
+  coef() %>%  
+  broom::tidy() %>%  
+  filter(stringr::str_detect(names, "\\*")) 
+```
+
+```{r pdp, fig.width=10, fig.cap="Partial dependence plots to understand the relationship between `Sale_Price` and the `Gr_Liv_Area` and `Year_Built` features.  The PDPs tell us that as `Gr_Liv_Area` increases and for newer homes, `Sale_Price` increases dramatically."}
+# Construct partial dependence plots
+p1 <- partial(cv_mars, pred.var = "Gr_Liv_Area", grid.resolution = 10) %>% 
+  autoplot()
+
+p2 <- partial(cv_mars, pred.var = "Year_Built", grid.resolution = 10) %>% 
+  autoplot()
+
+p3 <- partial(cv_mars, pred.var = c("Gr_Liv_Area", "Year_Built"), 
+              grid.resolution = 10) %>% 
+  plotPartial(levelplot = FALSE, zlab = "yhat", drape = TRUE, colorkey = TRUE, 
+              screen = list(z = -20, x = -60))
+
+# Display plots side by side
+gridExtra::grid.arrange(p1, p2, p3, ncol = 3)
+```
+
+## Attrition data
+
+```{r tuned-marts-attrition, fig.cap="Cross-validated accuracy rate for the 30 different hyperparameter combinations in our grid search. The optimal model retains 45 terms and includes no interaction effects."}
+# get attrition data
+df <- rsample::attrition %>% mutate_if(is.ordered, factor, ordered = FALSE)
+
+# Create training (70%) and test (30%) sets for the rsample::attrition data.
+# Use set.seed for reproducibility
+set.seed(123)
+churn_split <- rsample::initial_split(df, prop = .7, strata = "Attrition")
+churn_train <- rsample::training(churn_split)
+churn_test  <- rsample::testing(churn_split)
+
+
+# for reproducibiity
+set.seed(123)
+
+# cross validated model
+tuned_mars <- train(
+  x = subset(churn_train, select = -Attrition),
+  y = churn_train$Attrition,
+  method = "earth",
+  trControl = trainControl(method = "cv", number = 10),
+  tuneGrid = hyper_grid
+)
+
+# best model
+tuned_mars$bestTune
+
+# plot results
+ggplot(tuned_mars)
+```
+
+Table 7.2:
+
+```{r attrition-modeling-mars, echo=TRUE, fig.cap="Cross-validated accuracy results for tuned MARS and regression models."}
+# train logistic regression model
+set.seed(123)
+glm_mod <- train(
+  Attrition ~ ., 
+  data = churn_train, 
+  method = "glm",
+  family = "binomial",
+  preProc = c("zv", "center", "scale"),
+  trControl = trainControl(method = "cv", number = 10)
+  )
+
+# train regularized logistic regression model
+set.seed(123)
+penalized_mod <- train(
+  Attrition ~ ., 
+  data = churn_train, 
+  method = "glmnet",
+  family = "binomial",
+  preProc = c("zv", "center", "scale"),
+  trControl = trainControl(method = "cv", number = 10),
+  tuneLength = 10
+  )
+
+# extract out of sample performance measures
+summary(resamples(list(
+  Logistic_model = glm_mod, 
+  Elastic_net = penalized_mod,
+  MARS_model = tuned_mars
+  )))$statistics$Accuracy %>%
+  kableExtra::kable(caption = "Cross-validated accuracy results for tuned MARS and regression models.") %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover"))
+```

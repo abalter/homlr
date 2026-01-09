@@ -1,0 +1,427 @@
+---
+title: "Regularized Regression"
+output: html_notebook
+---
+
+__Note__: Some results may differ from the hard copy book due to the changing of sampling procedures introduced in R 3.6.0. See http://bit.ly/35D1SW7 for more details. Access and run the source code for this notebook [here](https://rstudio.cloud/project/801185). 
+
+Hidden chapter requirements used in the book to set the plotting theme and load packages used in hidden code chunks:
+
+```{r setup}
+# Set the graphical theme
+ggplot2::theme_set(ggplot2::theme_light())
+
+# Set global knitr chunk options
+knitr::opts_chunk$set(
+  fig.align = "center",
+  fig.height = 3.5
+)
+
+library(tidyverse)
+ames <- AmesHousing::make_ames()
+```
+
+## Prerequisites
+
+This chapter leverages the following packages:
+
+```{r}
+# Helper packages
+library(recipes)  # for feature engineering
+
+# Modeling packages
+library(glmnet)   # for implementing regularized regression
+library(caret)    # for automating the tuning process
+
+# Model interpretability packages
+library(vip)      # for variable importance
+```
+
+To illustrate various regularization concepts we'll continue working with the `ames_train` and `ames_test` data sets:
+
+```{r 06-ames-train, echo=TRUE}
+library(rsample)
+
+# Stratified sampling with the rsample package
+set.seed(123)  # for reproducibility
+split  <- initial_split(ames, prop = 0.7, strata = "Sale_Price")
+ames_train  <- training(split)
+ames_test   <- testing(split)
+```
+
+## Why regularize? 
+
+Figure 6.1:
+
+```{r hyperplane, echo=TRUE, fig.cap="Fitted regression line using Ordinary Least Squares."}
+ames_sub <- ames_train %>%
+  filter(Gr_Liv_Area > 1000 & Gr_Liv_Area < 3000) %>%
+  sample_frac(.5)
+model1 <- lm(Sale_Price ~ Gr_Liv_Area, data = ames_sub)
+
+model1 %>%
+  broom::augment() %>%
+  ggplot(aes(Gr_Liv_Area, Sale_Price)) + 
+  geom_segment(aes(x = Gr_Liv_Area, y = Sale_Price,
+                   xend = Gr_Liv_Area, yend = .fitted), 
+               alpha = 0.3) +
+  geom_point(size = 1, color = "red") +
+  geom_smooth(se = FALSE, method = "lm") +
+  scale_y_continuous(labels = scales::dollar)
+```
+
+
+### Ridge penalty
+
+Figure 6.2:
+
+```{r ridge-coef-example, echo=TRUE, fig.cap="Ridge regression coefficients for 15 exemplar predictor variables as $\\lambda$ grows from  $0 \\rightarrow \\infty$. As $\\lambda$ grows larger, our coefficient magnitudes are more constrained.", fig.height=3.5, fig.width=7, message=FALSE, warning=FALSE}
+boston_train_x <- model.matrix(cmedv ~ ., pdp::boston)[, -1]
+boston_train_y <- pdp::boston$cmedv
+
+# model
+boston_ridge <- glmnet::glmnet(
+  x = boston_train_x,
+  y = boston_train_y,
+  alpha = 0
+)
+
+lam <- boston_ridge$lambda %>% 
+  as.data.frame() %>%
+  mutate(penalty = boston_ridge$a0 %>% names()) %>%
+  rename(lambda = ".")
+
+results <- boston_ridge$beta %>% 
+  as.matrix() %>% 
+  as.data.frame() %>%
+  rownames_to_column() %>%
+  gather(penalty, coefficients, -rowname) %>%
+  left_join(lam)
+
+result_labels <- results %>%
+  group_by(rowname) %>%
+  filter(lambda == min(lambda)) %>%
+  ungroup() %>%
+  top_n(5, wt = abs(coefficients)) %>%
+  mutate(var = paste0("x", 1:5))
+
+ggplot() +
+  geom_line(data = results, aes(lambda, coefficients, group = rowname, color = rowname), show.legend = FALSE) +
+  scale_x_log10() +
+  geom_text(data = result_labels, aes(lambda, coefficients, label = var, color = rowname), nudge_x = -.06, show.legend = FALSE)
+```
+
+### Lasso penalty
+
+Figure 6.3:
+
+```{r lasso-coef-example, echo=TRUE, fig.cap="Lasso regression coefficients as $\\lambda$ grows from  $0 \\rightarrow \\infty$.", fig.height=3.5, fig.width=7, message=FALSE, warning=FALSE}
+boston_train_x <- model.matrix(cmedv ~ ., pdp::boston)[, -1]
+boston_train_y <- pdp::boston$cmedv
+
+# model
+boston_lasso <- glmnet::glmnet(
+  x = boston_train_x,
+  y = boston_train_y,
+  alpha = 1
+)
+
+lam <- boston_lasso$lambda %>% 
+  as.data.frame() %>%
+  mutate(penalty = boston_lasso$a0 %>% names()) %>%
+  rename(lambda = ".")
+
+results <- boston_lasso$beta %>% 
+  as.matrix() %>% 
+  as.data.frame() %>%
+  rownames_to_column() %>%
+  gather(penalty, coefficients, -rowname) %>%
+  left_join(lam)
+
+result_labels <- results %>%
+  group_by(rowname) %>%
+  filter(lambda == min(lambda)) %>%
+  ungroup() %>%
+  top_n(5, wt = abs(coefficients)) %>%
+  mutate(var = paste0("x", 1:5))
+
+ggplot() +
+  geom_line(data = results, aes(lambda, coefficients, group = rowname, color = rowname), show.legend = FALSE) +
+  scale_x_log10() +
+  geom_text(data = result_labels, aes(lambda, coefficients, label = var, color = rowname), nudge_x = -.05, show.legend = FALSE)
+```
+
+### Elastic nets 
+
+Figure 6.4:
+
+```{r elastic-net-coef-example, echo=TRUE, fig.cap="Elastic net coefficients as $\\lambda$ grows from  $0 \\rightarrow \\infty$.", fig.height=3.5, fig.width=7, message=FALSE, warning=FALSE}
+# model
+boston_elastic <- glmnet::glmnet(
+  x = boston_train_x,
+  y = boston_train_y,
+  alpha = .2
+)
+
+lam <- boston_elastic$lambda %>% 
+  as.data.frame() %>%
+  mutate(penalty = boston_elastic$a0 %>% names()) %>%
+  rename(lambda = ".")
+
+results <- boston_elastic$beta %>% 
+  as.matrix() %>% 
+  as.data.frame() %>%
+  rownames_to_column() %>%
+  gather(penalty, coefficients, -rowname) %>%
+  left_join(lam)
+
+result_labels <- results %>%
+  group_by(rowname) %>%
+  filter(lambda == min(lambda)) %>%
+  ungroup() %>%
+  top_n(5, wt = abs(coefficients)) %>%
+  mutate(var = paste0("x", 1:5))
+
+ggplot() +
+  geom_line(data = results, aes(lambda, coefficients, group = rowname, color = rowname), show.legend = FALSE) +
+  scale_x_log10() +
+  geom_text(data = result_labels, aes(lambda, coefficients, label = var, color = rowname), nudge_x = -.05, show.legend = FALSE)
+```
+
+## Implementation
+
+```{r regularized-regression-data-prep}
+# Create training  feature matrices
+# we use model.matrix(...)[, -1] to discard the intercept
+X <- model.matrix(Sale_Price ~ ., ames_train)[, -1]
+
+# transform y with log transformation
+Y <- log(ames_train$Sale_Price)
+```
+
+```{r ridge1, fig.cap="Coefficients for our ridge regression model as $\\lambda$ grows from  $0 \\rightarrow \\infty$.", fig.height=4.5, fig.width=7}
+# Apply ridge regression to ames data
+ridge <- glmnet(
+  x = X,
+  y = Y,
+  alpha = 0
+)
+
+plot(ridge, xvar = "lambda")
+```
+
+```{r ridge1-results}
+# lambdas applied to penalty parameter
+ridge$lambda %>% head()
+
+# small lambda results in large coefficients
+coef(ridge)[c("Latitude", "Overall_QualVery_Excellent"), 100]
+
+# large lambda results in small coefficients
+coef(ridge)[c("Latitude", "Overall_QualVery_Excellent"), 1]  
+```
+
+
+## Tuning
+
+```{r ridge-lasso-cv-models, fig.height=4, fig.width=9, fig.cap="10-fold CV MSE for a ridge and lasso model. First dotted vertical line in each plot represents the $\\lambda$ with the smallest MSE and the second represents the $\\lambda$ with an MSE within one standard error of the minimum MSE.", message=FALSE, warning=FALSE}
+# Apply CV ridge regression to Ames data
+ridge <- cv.glmnet(
+  x = X,
+  y = Y,
+  alpha = 0
+)
+
+# Apply CV lasso regression to Ames data
+lasso <- cv.glmnet(
+  x = X,
+  y = Y,
+  alpha = 1
+)
+
+# plot results
+par(mfrow = c(1, 2))
+plot(ridge, main = "Ridge penalty\n\n")
+plot(lasso, main = "Lasso penalty\n\n")
+```
+
+```{r ridge-lasso-cv-results}
+# Ridge model
+min(ridge$cvm)       # minimum MSE
+ridge$lambda.min     # lambda for this min MSE
+
+ridge$cvm[ridge$lambda == ridge$lambda.1se]  # 1-SE rule
+ridge$lambda.1se  # lambda for this MSE
+
+# Lasso model
+min(lasso$cvm)       # minimum MSE
+lasso$lambda.min     # lambda for this min MSE
+
+lasso$cvm[lasso$lambda == lasso$lambda.1se]  # 1-SE rule
+lasso$lambda.1se  # lambda for this MSE
+```
+
+```{r ridge-lasso-cv-viz-results, fig.height=4, fig.width=9, fig.cap="Coefficients for our ridge and lasso models. First dotted vertical line in each plot represents the $\\lambda$ with the smallest MSE and the second represents the $\\lambda$ with an MSE within one standard error of the minimum MSE."}
+# Ridge model
+ridge_min <- glmnet(
+  x = X,
+  y = Y,
+  alpha = 0
+)
+
+# Lasso model
+lasso_min <- glmnet(
+  x = X,
+  y = Y,
+  alpha = 1
+)
+
+par(mfrow = c(1, 2))
+# plot ridge model
+plot(ridge_min, xvar = "lambda", main = "Ridge penalty\n\n")
+abline(v = log(ridge$lambda.min), col = "red", lty = "dashed")
+abline(v = log(ridge$lambda.1se), col = "blue", lty = "dashed")
+
+# plot lasso model
+plot(lasso_min, xvar = "lambda", main = "Lasso penalty\n\n")
+abline(v = log(lasso$lambda.min), col = "red", lty = "dashed")
+abline(v = log(lasso$lambda.1se), col = "blue", lty = "dashed")
+```
+
+Figure 6.8:
+
+```{r glmnet-elastic-comparison, echo=TRUE, fig.height=7, fig.width=9, fig.cap="Coefficients for various penalty parameters."}
+lasso    <- glmnet(X, Y, alpha = 1.0) 
+elastic1 <- glmnet(X, Y, alpha = 0.25) 
+elastic2 <- glmnet(X, Y, alpha = 0.75) 
+ridge    <- glmnet(X, Y, alpha = 0.0)
+
+par(mfrow = c(2, 2), mar = c(6, 4, 6, 2) + 0.1)
+plot(lasso, xvar = "lambda", main = "Lasso (Alpha = 1)\n\n\n")
+plot(elastic1, xvar = "lambda", main = "Elastic Net (Alpha = .25)\n\n\n")
+plot(elastic2, xvar = "lambda", main = "Elastic Net (Alpha = .75)\n\n\n")
+plot(ridge, xvar = "lambda", main = "Ridge (Alpha = 0)\n\n\n")
+```
+
+```{r glmnet-tuning-grid, fig.height=3.5, fig.width=8, fig.cap="The 10-fold cross valdation RMSE across 10 alpha values (x-axis) and 10 lambda values (line color).", message=FALSE, warning=FALSE}
+# for reproducibility
+set.seed(123)
+
+# grid search across 
+cv_glmnet <- train(
+  x = X,
+  y = Y,
+  method = "glmnet",
+  preProc = c("zv", "center", "scale"),
+  trControl = trainControl(method = "cv", number = 10),
+  tuneLength = 10
+)
+
+# model with lowest RMSE
+cv_glmnet$bestTune
+
+# plot cross-validated RMSE
+ggplot(cv_glmnet)
+```
+
+```{r re-transform}
+# predict sales price on training data
+pred <- predict(cv_glmnet, X)
+
+# compute RMSE of transformed predicted
+RMSE(exp(pred), exp(Y))
+```
+
+## Feature interpretation
+
+```{r regularize-vip, fig.cap="Top 20 most important variables for the optimal regularized regression model.", fig.height=4}
+vip(cv_glmnet, num_features = 20, bar = FALSE)
+```
+
+Figure 6.11:
+
+```{r regularized-top4-pdp, echo=TRUE, fig.height=5, fig.width=7, fig.cap="Partial dependence plots for the first four most important variables."}
+p1 <- pdp::partial(cv_glmnet, pred.var = "Gr_Liv_Area", grid.resolution = 20) %>%
+  mutate(yhat = exp(yhat)) %>%
+  ggplot(aes(Gr_Liv_Area, yhat)) +
+  geom_line() +
+  scale_y_continuous(limits = c(0, 300000), labels = scales::dollar)
+
+p2 <- pdp::partial(cv_glmnet, pred.var = "Overall_QualExcellent") %>%
+  mutate(
+    yhat = exp(yhat),
+    Overall_QualExcellent = factor(Overall_QualExcellent)
+    ) %>%
+  ggplot(aes(Overall_QualExcellent, yhat)) +
+  geom_boxplot() +
+  scale_y_continuous(limits = c(0, 300000), labels = scales::dollar)
+
+p3 <- pdp::partial(cv_glmnet, pred.var = "First_Flr_SF", grid.resolution = 20) %>%
+  mutate(yhat = exp(yhat)) %>%
+  ggplot(aes(First_Flr_SF, yhat)) +
+  geom_line() +
+  scale_y_continuous(limits = c(0, 300000), labels = scales::dollar)
+
+p4 <- pdp::partial(cv_glmnet, pred.var = "Garage_Cars") %>%
+  mutate(yhat = exp(yhat)) %>%
+  ggplot(aes(Garage_Cars, yhat)) +
+  geom_line() +
+  scale_y_continuous(limits = c(0, 300000), labels = scales::dollar)
+
+grid.arrange(p1, p2, p3, p4, nrow = 2)
+```
+
+Figure 6.12:
+
+```{r regularized-num5-pdp, echo=TRUE, fig.height=2, fig.width=3, fig.cap="Partial dependence plot for when overall quality of a home is (1) versus is not poor (0)."}
+pdp::partial(cv_glmnet, pred.var = "Overall_QualPoor") %>%
+  mutate(
+    yhat = exp(yhat),
+    Overall_QualPoor = factor(Overall_QualPoor)
+    ) %>%
+  ggplot(aes(Overall_QualPoor, yhat)) +
+  geom_boxplot() +
+  scale_y_continuous(limits = c(0, 300000), labels = scales::dollar)
+```
+
+## Attrition data
+
+```{r attrition-modeling, message=FALSE, warning=FALSE}
+df <- attrition %>% mutate_if(is.ordered, factor, ordered = FALSE)
+
+# Create training (70%) and test (30%) sets for the
+# rsample::attrition data. Use set.seed for reproducibility
+set.seed(123)
+churn_split <- initial_split(df, prop = .7, strata = "Attrition")
+train <- training(churn_split)
+test  <- testing(churn_split)
+
+# train logistic regression model
+set.seed(123)
+glm_mod <- train(
+  Attrition ~ ., 
+  data = train, 
+  method = "glm",
+  family = "binomial",
+  preProc = c("zv", "center", "scale"),
+  trControl = trainControl(method = "cv", number = 10)
+  )
+
+# train regularized logistic regression model
+set.seed(123)
+penalized_mod <- train(
+  Attrition ~ ., 
+  data = train, 
+  method = "glmnet",
+  family = "binomial",
+  preProc = c("zv", "center", "scale"),
+  trControl = trainControl(method = "cv", number = 10),
+  tuneLength = 10
+  )
+
+# extract out of sample performance measures
+summary(resamples(list(
+  logistic_model = glm_mod, 
+  penalized_model = penalized_mod
+  )))$statistics$Accuracy
+```

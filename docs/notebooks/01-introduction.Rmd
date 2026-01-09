@@ -1,0 +1,113 @@
+---
+title: "Chapter 01: Introduction to Machine Learning"
+output: html_notebook
+---
+
+__NOTE__: Access and run the source code for this notebook [here](https://rstudio.cloud/project/801185). 
+
+## Regression problems
+
+Code for Figure 1.1:
+
+```{r intro-regression-problem, echo=TRUE, fig.cap="Average home sales price as a function of year built and total square footage.", fig.height=3, fig.width=3}
+df <- AmesHousing::make_ames()
+x <- matrix(sort(df$Gr_Liv_Area)[floor(seq(1, nrow(df), length.out = 15))], 15, 1)
+y <- matrix(sort(df$Year_Built)[floor(seq(1, nrow(df), length.out = 15))], 1, 15)
+z <- 25051 + 3505*(log(x^.9) %*% log(y)) - 5*as.vector(x) 
+c <- matrix(c(.92, .95, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, .95), 1, 15)
+z <- sweep(z, MARGIN = 2, c, `*`)
+
+par(mar = c(0.1, 0.1, 0.1, 0.1))
+persp(
+  x = x,
+  y = y,
+  z = z,
+  xlab = "Square footage",
+  ylab = "Year built",
+  zlab = "Sale price",
+  theta = -45,
+  phi = 25,
+  col = viridis::viridis(100)
+)
+```
+
+## Classification problems
+
+Code for Figure 1.2:
+    
+```{r classification-problem, echo=TRUE, out.width="75%", out.height="75%", fig.cap="Classification problem modeling with 'Yes' and 'No' response based on three features.", cache=FALSE}
+# code to create graphic
+library(DiagrammeR)
+ grViz("
+   
+   digraph boxes_and_circles {
+     node [shape = circle]
+     x1; x2; x3;
+     
+     node [shape = box]
+     Model;
+     
+     node [shape = triangle]
+     Yes; No;
+ 
+     x1->Model; x2->Model; x3->Model; Model->No; Model->Yes;
+ }")
+```
+
+## The data sets
+
+* Ames homes sales data
+    
+```{r import-ames-data}
+# access data
+ames <- AmesHousing::make_ames()
+
+# initial dimension
+dim(ames)
+
+# response variable
+head(ames$Sale_Price)
+```
+    
+* Employee attrition information originally provided by [IBM Watson Analytics Lab](https://www.ibm.com/communities/analytics/watson-analytics-blog/hr-employee-attrition/).
+
+```{r import-attrition-data}
+# access data
+attrition <- rsample::attrition
+
+# initial dimension
+dim(attrition)
+
+# response variable
+head(attrition$Attrition)
+```    
+    
+* MNIST handwritten numbers data 
+
+```{r import-mnist-data, message=FALSE, warning=FALSE}
+#access data
+mnist <- dslabs::read_mnist()
+names(mnist)
+
+# initial feature dimensions
+dim(mnist$train$images)
+
+# response variable
+head(mnist$train$labels)
+```   
+
+* Grocery items and quantities purchased. 
+
+```{r import-mybasket-data, message=FALSE, warning=FALSE}
+# URL to download/read in the data
+url <- "https://koalaverse.github.io/homlr/data/my_basket.csv"
+
+# Access data
+my_basket <- readr::read_csv(url)
+
+# Print dimensions
+dim(my_basket)
+
+# Peek at response variable
+my_basket
+```   

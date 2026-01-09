@@ -1,0 +1,294 @@
+---
+title: "Chapter 9: Decision Trees"
+output: html_notebook
+---
+
+__Note__: Some results may differ from the hard copy book due to the changing of sampling procedures introduced in R 3.6.0. See http://bit.ly/35D1SW7 for more details. Access and run the source code for this notebook [here](https://rstudio.cloud/project/801185). 
+
+Hidden chapter requirements used in the book to set the plotting theme and load packages used in hidden code chunks:
+
+```{r setup}
+# Set global R options
+options(scipen = 999)
+
+# Set the graphical theme
+ggplot2::theme_set(ggplot2::theme_light())
+
+# Set global knitr chunk options
+knitr::opts_chunk$set(
+  warning = FALSE, 
+  message = FALSE
+)
+
+library(tidyverse)
+library(rpart)
+library(rpart.plot)
+ames <- AmesHousing::make_ames()
+```
+
+## Prerequisites
+
+In this chapter we'll use the following packages:
+
+```{r dt-pkgs}
+# Helper packages
+library(dplyr)       # for data wrangling
+library(ggplot2)     # for awesome plotting
+
+# Modeling packages
+library(rpart)       # direct engine for decision tree application
+library(caret)       # meta engine for decision tree application
+
+# Model interpretability packages
+library(rpart.plot)  # for plotting decision trees
+library(vip)         # for feature importance
+library(pdp)         # for feature effects
+```
+
+We'll continue to illustrate the main concepts using the Ames housing data:
+
+```{r dt-data-prereq, echo=TRUE}
+# Create training (70%) set for the Ames housing data.
+set.seed(123)
+split  <- rsample::initial_split(ames, prop = 0.7, strata = "Sale_Price")
+ames_train  <- rsample::training(split)
+```
+
+
+## Structure
+
+Figure 9.1:
+
+```{r exemplar-decision-tree, echo=TRUE, fig.cap="Exemplar decision tree predicting whether or not a customer will redeem a coupon (yes or no) based on the customer's loyalty, household income, last month's spend, coupon placement, and shopping mode.", out.height="100%", out.width="100%"}
+knitr::include_graphics("images/exemplar-decision-tree.png")
+```
+
+Figure 9.2:
+
+```{r decision-tree-terminology, echo=TRUE, fig.cap="Terminology of a decision tree.", out.height="80%", out.width="80%"}
+knitr::include_graphics("images/decision-tree-terminology.png")
+```
+
+
+## Partitioning
+
+Figure 9.3:
+
+```{r decision-stump, echo=TRUE, fig.width=4, fig.height=3, fig.show='hold', fig.cap="Decision tree illustrating the single split on feature x (left). The resulting decision boundary illustrates the predicted value when x < 3.1 (0.64), and when x > 3.1 (-0.67) (right).", out.width="48%"}
+# create data
+set.seed(1112)  # for reproducibility
+df <- tibble::tibble(
+  x = seq(from = 0, to = 2 * pi, length = 500),
+  y = sin(x) + rnorm(length(x), sd = 0.5),
+  truth = sin(x)
+)
+
+# run decision stump model
+ctrl <- list(cp = 0, minbucket = 5, maxdepth = 1)
+fit <- rpart(y ~ x, data = df, control = ctrl)
+
+# plot tree 
+par(mar = c(1, 1, 1, 1))
+rpart.plot(fit)
+
+# plot decision boundary
+df %>%
+  mutate(pred = predict(fit, df)) %>%
+  ggplot(aes(x, y)) +
+  geom_point(alpha = .2, size = 1) +
+  geom_line(aes(x, y = truth), color = "blue", size = .75) +
+  geom_line(aes(y = pred), color = "red", size = .75) +
+  geom_segment(x = 3.1, xend = 3.1, y = -Inf, yend = -.95,
+               arrow = arrow(length = unit(0.25,"cm")), size = .25) +
+  annotate("text", x = 3.1, y = -Inf, label = "split", hjust = 1.2, vjust = -1, size = 3) +
+  geom_segment(x = 5.5, xend = 6, y = 2, yend = 2, size = .75, color = "blue") +
+  geom_segment(x = 5.5, xend = 6, y = 1.7, yend = 1.7, size = .75, color = "red") +
+  annotate("text", x = 5.3, y = 2, label = "truth", hjust = 1, size = 3, color = "blue") +
+  annotate("text", x = 5.3, y = 1.7, label = "decision boundary", hjust = 1, size = 3, color = "red")
+```
+
+Figure 9.4:
+
+```{r depth-3-decision-tree, echo=TRUE, fig.width=4, fig.height=3, fig.show='hold', fig.cap="Decision tree illustrating with depth = 3, resulting in 7 decision splits along values of feature x and 8 prediction regions (left). The resulting decision boundary (right).", out.width="48%"}
+# fit depth 3 decision tree
+ctrl <- list(cp = 0, minbucket = 5, maxdepth = 3)
+fit <- rpart(y ~ x, data = df, control = ctrl)
+rpart.plot(fit)
+
+# plot decision boundary
+df %>%
+  mutate(pred = predict(fit, df)) %>%
+  ggplot(aes(x, y)) +
+  geom_point(alpha = .2, size = 1) +
+  geom_line(aes(x, y = truth), color = "blue", size = .75) +
+  geom_line(aes(y = pred), color = "red", size = .75)
+```
+
+Figure 9.5:
+
+```{r iris-decision-tree, echo=TRUE, fig.width=4, fig.height=3, fig.show='hold', fig.cap="Decision tree for the iris classification problem (left). The decision boundary results in rectangular regions that enclose the observations.  The class with the highest proportion in each region is the predicted value (right).", out.width="48%"}
+# decision tree
+iris_fit <- rpart(Species ~ Sepal.Length + Sepal.Width, data = iris)
+rpart.plot(iris_fit)
+
+# decision boundary
+ggplot(iris, aes(Sepal.Length, Sepal.Width, color = Species, shape = Species)) +
+  geom_point(show.legend = FALSE) +
+  annotate("rect", xmin = -Inf, xmax = 5.44, ymin = 2.8, ymax = Inf, alpha = .75, fill = "orange") +
+  annotate("text", x = 4.0, y = 4.4, label = "setosa", hjust = 0, size = 3) +
+  annotate("rect", xmin = -Inf, xmax = 5.44, ymin = 2.79, ymax = -Inf, alpha = .75, fill = "grey") +
+  annotate("text", x = 4.0, y = 2, label = "versicolor", hjust = 0, size = 3) +
+  annotate("rect", xmin = 5.45, xmax = 6.15, ymin = 3.1, ymax = Inf, alpha = .75, fill = "orange") +
+  annotate("text", x = 6, y = 4.4, label = "setosa", hjust = 1, vjust = 0, size = 3) +
+  annotate("rect", xmin = 5.45, xmax = 6.15, ymin = 3.09, ymax = -Inf, alpha = .75, fill = "grey") +
+  annotate("text", x = 6.15, y = 2, label = "versicolor", hjust = 1, vjust = 0, fill = "grey", size = 3) +
+  annotate("rect", xmin = 6.16, xmax = Inf, ymin = -Inf, ymax = Inf, alpha = .75, fill = "green") +
+  annotate("text", x = 8, y = 2, label = "virginica", hjust = 1, vjust = 0, fill = "green", size = 3)
+
+```
+
+
+## How deep?
+
+Figure 9.6:
+
+```{r deep-overfit-tree, echo=TRUE, fig.width=4, fig.height=3, fig.show='hold', fig.cap="Overfit decision tree with 56 splits.", out.width="48%"}
+ctrl <- list(cp = 0, minbucket = 1, maxdepth = 50)
+fit <- rpart(y ~ x, data = df, control = ctrl)
+rpart.plot(fit)
+
+df %>%
+  mutate(pred = predict(fit, df)) %>%
+  ggplot(aes(x, y)) +
+  geom_point(alpha = .2, size = 1) +
+  geom_line(aes(x, y = truth), color = "blue", size = 0.75) +
+  geom_line(aes(y = pred), color = "red", size = 0.75)
+```
+
+### Early stopping
+
+Figure 9.7:
+
+```{r dt-early-stopping, fig.width=10, fig.height=8, fig.cap="Illustration of how early stopping affects the decision boundary of a regression decision tree. The columns illustrate how tree depth impacts the decision boundary and the rows illustrate how the minimum number of observations in the terminal node influences the decision boundary.", echo=TRUE}
+hyper_grid <- expand.grid(
+  maxdepth = c(1, 5, 15),
+  minbucket = c(1, 5, 15)
+)
+results <- data.frame(NULL)
+
+for(i in seq_len(nrow(hyper_grid))) {
+ ctrl <- list(cp = 0, maxdepth = hyper_grid$maxdepth[i], minbucket = hyper_grid$minbucket[i])
+ fit <- rpart(y ~ x, data = df, control = ctrl) 
+ 
+ predictions <- mutate(
+   df, 
+   minbucket = factor(paste("Min node size =", hyper_grid$minbucket[i]), ordered = TRUE),
+   maxdepth = factor(paste("Max tree depth =", hyper_grid$maxdepth[i]), ordered = TRUE)
+   )
+ predictions$pred <- predict(fit, df)
+ results <- rbind(results, predictions)
+   
+}
+
+ggplot(results, aes(x, y)) +
+  geom_point(alpha = .2, size = 1) +
+  geom_line(aes(x, y = truth), color = "blue", size = .75) +
+  geom_line(aes(y = pred), color = "red", size = 1) +
+  facet_grid(minbucket ~ maxdepth)
+```
+
+### Pruning
+
+Figure 9.8:
+
+```{r pruned-tree, fig.width=10, fig.height = 4, fig.cap="To prune a tree, we grow an overly complex tree (left) and then use a cost complexity parameter to identify the optimal subtree (right).", echo=TRUE}
+ctrl <- list(cp = 0, minbucket = 1, maxdepth = 50)
+fit <- rpart(y ~ x, data = df, control = ctrl)
+
+p1 <- df %>%
+  mutate(pred = predict(fit, df)) %>%
+  ggplot(aes(x, y)) +
+  geom_point(alpha = .3, size = 2) +
+  geom_line(aes(x, y = truth), color = "blue", size = 1) +
+  geom_line(aes(y = pred), color = "red", size = 1)
+
+fit2 <- rpart(y ~ x, data = df)
+
+p2 <- df %>%
+  mutate(pred2 = predict(fit2, df)) %>%
+  ggplot(aes(x, y)) +
+  geom_point(alpha = .3, size = 2) +
+  geom_line(aes(x, y = truth), color = "blue", size = 1) +
+  geom_line(aes(y = pred2), color = "red", size = 1)
+
+gridExtra::grid.arrange(p1, p2, nrow = 1)
+```
+
+
+## Ames housing example
+
+```{r basic-ames-tree}
+ames_dt1 <- rpart(
+  formula = Sale_Price ~ .,
+  data    = ames_train,
+  method  = "anova"
+)
+```
+
+```{r basic-ames-dt-tree-results, linewidth = 70}
+ames_dt1
+```
+
+```{r basic-ames-tree-plot, fig.width=10, fig.height=6, fig.cap="Diagram displaying the pruned decision tree for the Ames Housing data."}
+rpart.plot(ames_dt1)
+```
+
+```{r plot-cp, fig.width = 5, fig.height=3.5, fig.cap="Pruning complexity parameter (cp) plot illustrating the relative cross validation error (y-axis) for various cp values (lower x-axis). Smaller cp values lead to larger trees (upper x-axis). Using the 1-SE rule, a tree size of 10-12 provides optimal cross validation results."}
+plotcp(ames_dt1)
+```
+
+```{r no-cp-tree, fig.cap="Pruning complexity parameter plot for a fully grown tree. Significant reduction in the cross validation error is achieved with tree sizes 6-20 and then the cross validation error levels off with minimal or no additional improvements."}
+ames_dt2 <- rpart(
+    formula = Sale_Price ~ .,
+    data    = ames_train,
+    method  = "anova", 
+    control = list(cp = 0, xval = 10)
+)
+
+plotcp(ames_dt2)
+abline(v = 11, lty = "dashed")
+```
+
+```{r cp-table, fig.cap="Cross-validated accuracy rate for the 20 different $\\alpha$ parameter values in our grid search. Lower $\\alpha$ values (deeper trees) help to minimize errors.", fig.height=3}
+# rpart cross validation results
+ames_dt1$cptable
+
+# caret cross validation results
+ames_dt3 <- train(
+  Sale_Price ~ .,
+  data = ames_train,
+  method = "rpart",
+  trControl = trainControl(method = "cv", number = 10),
+  tuneLength = 20
+)
+
+ggplot(ames_dt3)
+```
+
+## Feature interpretation 
+
+```{r dt-vip, fig.height=5.5, fig.cap="Variable importance based on the total reduction in MSE for the Ames Housing decision tree."}
+vip(ames_dt3, num_features = 40, bar = FALSE)
+```
+
+```{r dt-pdp, fig.width=10, fig.height= 3.5, fig.cap="Partial dependence plots to understand the relationship between sale price and the living space, and year built features."}
+# Construct partial dependence plots
+p1 <- partial(ames_dt3, pred.var = "Gr_Liv_Area") %>% autoplot()
+p2 <- partial(ames_dt3, pred.var = "Year_Built") %>% autoplot()
+p3 <- partial(ames_dt3, pred.var = c("Gr_Liv_Area", "Year_Built")) %>% 
+  plotPartial(levelplot = FALSE, zlab = "yhat", drape = TRUE, 
+              colorkey = TRUE, screen = list(z = -20, x = -60))
+
+# Display plots side by side
+gridExtra::grid.arrange(p1, p2, p3, ncol = 3)
+```

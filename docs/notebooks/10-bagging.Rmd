@@ -1,0 +1,349 @@
+---
+title: "Chapter 10: Bagging"
+output: html_notebook
+---
+
+__Note__: Some results may differ from the hard copy book due to the changing of sampling procedures introduced in R 3.6.0. See http://bit.ly/35D1SW7 for more details. Access and run the source code for this notebook [here](https://rstudio.cloud/project/801185). 
+
+Hidden chapter requirements used in the book to set the plotting theme and load packages used in hidden code chunks:
+
+```{r setup}
+# Set global R options
+options(scipen = 999)
+
+# Set the graphical theme
+ggplot2::theme_set(ggplot2::theme_light())
+
+# Set global knitr chunk options
+knitr::opts_chunk$set(
+  warning = FALSE, 
+  message = FALSE
+)
+
+# Load required packages
+library(ggplot2)
+library(rsample)
+```
+
+## Prerequisites
+
+In this chapter we'll make use of the following packages:
+
+```{r}
+# Helper packages
+library(dplyr)       # for data wrangling
+library(ggplot2)     # for awesome plotting
+library(doParallel)  # for parallel backend to foreach
+library(foreach)     # for parallel processing with for loops
+
+# Modeling packages
+library(caret)       # for general model fitting
+library(rpart)       # for fitting decision trees
+library(ipred)       # for fitting bagged decision trees
+```
+
+We'll continue to illustrate the main concepts with the `ames_train` data:
+
+```{r 08-ames-train, echo=TRUE}
+# create Ames training data
+set.seed(123)
+ames <- AmesHousing::make_ames()
+split  <- initial_split(ames, prop = 0.7, strata = "Sale_Price")
+ames_train  <- training(split)
+ames_test  <- testing(split)
+```
+
+## Why and when bagging works
+
+Figure 10.1:
+
+```{r bagging-multiple-models, echo=TRUE, fig.width=12, fig.cap="The effect of bagging 100 base learners. High variance models such as decision trees (C) benefit the most from the aggregation effect in bagging, whereas low variance models such as polynomial regression (A) show little improvement. "}
+# Simulate some nonlinear monotonic data
+set.seed(123)  # for reproducibility
+x <- seq(from = 0, to = 2 * pi, length = 500)
+y <- sin(x) + rnorm(length(x), sd = 0.3)
+df <- data.frame(x, y) %>%
+  filter(x < 4.5)
+
+# bootstrapped polynomial model fit
+bootstrap_n <- 100
+bootstrap_results <- NULL
+for(i in seq_len(bootstrap_n)) {
+  # reproducible sampled data frames
+  set.seed(i)
+  index <- sample(seq_len(nrow(df)), nrow(df), replace = TRUE)
+  df_sim <- df[index, ]
+  
+  # fit model and add predictions to results data frame
+  fit <- lm(y ~ I(x^3), data = df_sim)
+  df_sim$predictions <- predict(fit, df_sim)
+  df_sim$model <- paste0("model", i)
+  df_sim$ob <- index
+  bootstrap_results <- rbind(bootstrap_results, df_sim)
+}
+
+p1 <- ggplot(bootstrap_results, aes(x, predictions)) +
+  geom_point(data = df, aes(x, y), alpha = .25) +
+  geom_line(aes(group = model), show.legend = FALSE, size = .5, alpha = .2) +
+  stat_summary(fun.y = "mean", colour = "red", size = 1, geom = "line") +
+  scale_y_continuous("Response", limits = c(-2, 2), expand = c(0, 0)) +
+  scale_x_continuous(limits = c(0, 5), expand = c(0, 0)) +
+  ggtitle("A) Polynomial regression")
+
+# bootstrapped MARS model fit
+bootstrap_n <- 100
+bootstrap_results <- NULL
+for(i in seq_len(bootstrap_n)) {
+  # reproducible sampled data frames
+  set.seed(i)
+  index <- sample(seq_len(nrow(df)), nrow(df), replace = TRUE)
+  df_sim <- df[index, ]
+  
+  # fit model and add predictions to results data frame
+  fit <- earth::earth(y ~ x, data = df_sim)
+  df_sim$predictions <- predict(fit, df_sim)
+  df_sim$model <- paste0("model", i)
+  df_sim$ob <- index
+  bootstrap_results <- rbind(bootstrap_results, df_sim)
+}
+
+p2 <- ggplot(bootstrap_results, aes(x, predictions)) +
+  geom_point(data = df, aes(x, y), alpha = .25) +
+  geom_line(aes(group = model), show.legend = FALSE, size = .5, alpha = .2) +
+  stat_summary(fun.y = "mean", colour = "red", size = 1, geom = "line") +
+  scale_y_continuous(NULL, limits = c(-2, 2), expand = c(0, 0)) +
+  scale_x_continuous(limits = c(0, 5), expand = c(0, 0)) +
+  ggtitle("B) MARS")
+
+# bootstrapped decision trees fit
+bootstrap_n <- 100
+bootstrap_results <- NULL
+for(i in seq_len(bootstrap_n)) {
+  # reproducible sampled data frames
+  set.seed(i)
+  index <- sample(seq_len(nrow(df)), nrow(df), replace = TRUE)
+  df_sim <- df[index, ]
+  
+  # fit model and add predictions to results data frame
+  fit <- rpart::rpart(y ~ x, data = df_sim)
+  df_sim$predictions <- predict(fit, df_sim)
+  df_sim$model <- paste0("model", i)
+  df_sim$ob <- index
+  bootstrap_results <- rbind(bootstrap_results, df_sim)
+}
+
+p3 <- ggplot(bootstrap_results, aes(x, predictions)) +
+  geom_point(data = df, aes(x, y), alpha = .25) +
+  geom_line(aes(group = model), show.legend = FALSE, size = .5, alpha = .2) +
+  stat_summary(fun.y = "mean", colour = "red", size = 1, geom = "line") +
+  scale_y_continuous(NULL, limits = c(-2, 2), expand = c(0, 0)) +
+  scale_x_continuous(limits = c(0, 5), expand = c(0, 0)) +
+  ggtitle("C) Decision trees")
+
+gridExtra::grid.arrange(p1, p2, p3, nrow = 1)
+```
+
+## Implementation
+
+```{r first-bagged-ames-model}
+# make bootstrapping reproducible
+set.seed(123)
+
+# train bagged model
+ames_bag1 <- bagging(
+  formula = Sale_Price ~ .,
+  data = ames_train,
+  nbagg = 100,  
+  coob = TRUE,
+  control = rpart.control(minsplit = 2, cp = 0)
+)
+
+ames_bag1
+```
+
+Figure 10.2:
+
+```{r n-bags-plot, echo=TRUE, fig.cap="Error curve for bagging 1-200 deep, unpruned decision trees. The benefit of bagging is optimized at 187 trees although the majority of error reduction occurred within the first 100 trees."}
+# # assess 10-200 bagged trees
+# ntree <- seq(10, 200, by = 2)
+# 
+# # create empty vector to store OOB RMSE values
+# rmse <- vector(mode = "numeric", length = length(ntree))
+# 
+# for (i in seq_along(ntree)) {
+#   # reproducibility
+#   set.seed(123)
+#   # perform bagged model
+#   model <- bagging(
+#   formula = Sale_Price ~ .,
+#   data    = ames_train,
+#   coob    = TRUE,
+#   control = rpart.control(minsplit = 2, cp = 0),
+#   nbagg   = ntree[i]
+# )
+#   # get OOB error
+#   rmse[i] <- model$err
+# }
+# 
+# bagging_errors <- data.frame(ntree, rmse)
+
+# using ranger to do the same as above.  Will allow for bagging under 10 trees
+# and is much faster!
+ntree <- seq(1, 200, by = 2)
+# create empty vector to store OOB RMSE values
+rmse <- vector(mode = "numeric", length = length(ntree))
+
+for (i in seq_along(ntree)) {
+  # reproducibility
+  set.seed(123)
+  # perform bagged model
+  model <- ranger::ranger(
+  formula = Sale_Price ~ .,
+  data    = ames_train,
+  num.trees = ntree[i],
+  mtry = ncol(ames_train) - 1,
+  min.node.size = 1
+)
+  # get OOB error
+  rmse[i] <- sqrt(model$prediction.error)
+}
+
+bagging_errors <- data.frame(ntree, rmse)
+
+ggplot(bagging_errors, aes(ntree, rmse)) +
+  geom_line() +
+  geom_hline(yintercept = 41019, lty = "dashed", color = "grey50") +
+  annotate("text", x = 100, y = 41385, label = "Best individual pruned tree", vjust = 0, hjust = 0, color = "grey50") +
+  annotate("text", x = 100, y = 26750, label = "Bagged trees", vjust = 0, hjust = 0) +
+  ylab("RMSE") +
+  xlab("Number of trees")
+```
+
+___Do to output size, the code chunks that follow should not be ran on RStudio Cloud___
+
+```{r ames-bag-with-caret}
+ames_bag2 <- train(
+  Sale_Price ~ .,
+  data = ames_train,
+  method = "treebag",
+  trControl = trainControl(method = "cv", number = 10),
+  nbagg = 200,  
+  control = rpart.control(minsplit = 2, cp = 0)
+)
+ames_bag2
+```
+
+## Easily parallelize
+
+```{r bagging-parallel}
+# Create a parallel socket cluster
+cl <- makeCluster(8) # use 8 workers
+registerDoParallel(cl) # register the parallel backend
+
+# Fit trees in parallel and compute predictions on the test set
+predictions <- foreach(
+  icount(160), 
+  .packages = "rpart", 
+  .combine = cbind
+  ) %dopar% {
+    # bootstrap copy of training data
+    index <- sample(nrow(ames_train), replace = TRUE)
+    ames_train_boot <- ames_train[index, ]  
+  
+    # fit tree to bootstrap copy
+    bagged_tree <- rpart(
+      Sale_Price ~ ., 
+      control = rpart.control(minsplit = 2, cp = 0),
+      data = ames_train_boot
+      ) 
+    
+    predict(bagged_tree, newdata = ames_test)
+}
+
+predictions[1:5, 1:7]
+```
+
+```{r plotting-parallel-bag, fig.cap="Error curve for custom parallel bagging of 1-160 deep, unpruned decision trees."}
+predictions %>%
+  as.data.frame() %>%
+  mutate(
+    observation = 1:n(),
+    actual = ames_test$Sale_Price) %>%
+  tidyr::gather(tree, predicted, -c(observation, actual)) %>%
+  group_by(observation) %>%
+  mutate(tree = stringr::str_extract(tree, '\\d+') %>% as.numeric()) %>%
+  ungroup() %>%
+  arrange(observation, tree) %>%
+  group_by(observation) %>%
+  mutate(avg_prediction = cummean(predicted)) %>%
+  group_by(tree) %>%
+  summarize(RMSE = RMSE(avg_prediction, actual)) %>%
+  ggplot(aes(tree, RMSE)) +
+  geom_line() +
+  xlab('Number of trees')
+```
+
+```{r shutdown-cluster}
+# Shutdown parallel cluster
+stopCluster(cl)
+```
+
+## Feature interpretation 
+
+```{r bag-vip, fig.height=5.75, fig.cap="Variable importance for 200 bagged trees for the Ames Housing data."}
+vip::vip(ames_bag2, num_features = 40, bar = FALSE)
+```
+
+```{r bag-pdp, fig.width=10, fig.cap="Partial dependence plots to understand the relationship between sales price and the lot area and frontage size features."}
+# Construct partial dependence plots
+p1 <- pdp::partial(
+  ames_bag2, 
+  pred.var = "Lot_Area",
+  grid.resolution = 20
+  ) %>% 
+  autoplot()
+
+p2 <- pdp::partial(
+  ames_bag2, 
+  pred.var = "Lot_Frontage", 
+  grid.resolution = 20
+  ) %>% 
+  autoplot()
+
+gridExtra::grid.arrange(p1, p2, nrow = 1)
+```
+
+
+## Final thoughts
+
+Figure 10.6:
+
+```{r tree-correlation, message=FALSE, warning=FALSE, fig.align='center', fig.cap="Six decision trees based on different bootstrap samples.", echo=TRUE, dev='png'}
+library(caret)
+library(randomForest)
+iter = 6
+par(mfrow = c(3, 3))
+for(i in 1:iter){
+  set.seed(i+30)
+  # create train/test sets
+  train_index <- caret::createDataPartition(pdp::boston$cmedv, p = .6333,
+                                     list = FALSE,
+                                     times = 1)
+  
+  train_DF <- pdp::boston[train_index,]
+  validate_DF <- pdp::boston[-train_index,]
+  
+  train_y <- train_DF$cmedv
+  train_x <- train_DF[, setdiff(names(train_DF), "cmedv")]
+  
+  validate_y <- validate_DF$cmedv
+  validate_x <- validate_DF[, setdiff(names(validate_DF), "cmedv")]
+  
+  d_tree <- rpart::rpart(cmedv ~ ., train_DF)
+  
+  # graphs
+  
+  rpart.plot::rpart.plot(d_tree, main = paste0("Decision Tree ", i), type = 0, extra = 0) 
+  
+}
+```
